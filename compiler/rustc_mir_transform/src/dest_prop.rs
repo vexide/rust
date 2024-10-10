@@ -137,16 +137,16 @@ use rustc_index::interval::SparseIntervalMatrix;
 use rustc_middle::bug;
 use rustc_middle::mir::visit::{MutVisitor, PlaceContext, Visitor};
 use rustc_middle::mir::{
-    dump_mir, traversal, Body, HasLocalDecls, InlineAsmOperand, Local, LocalKind, Location,
-    Operand, PassWhere, Place, Rvalue, Statement, StatementKind, TerminatorKind,
+    Body, HasLocalDecls, InlineAsmOperand, Local, LocalKind, Location, Operand, PassWhere, Place,
+    Rvalue, Statement, StatementKind, TerminatorKind, dump_mir, traversal,
 };
 use rustc_middle::ty::TyCtxt;
-use rustc_mir_dataflow::impls::MaybeLiveLocals;
-use rustc_mir_dataflow::points::{save_as_intervals, DenseLocationMap, PointIndex};
 use rustc_mir_dataflow::Analysis;
+use rustc_mir_dataflow::impls::MaybeLiveLocals;
+use rustc_mir_dataflow::points::{DenseLocationMap, PointIndex, save_as_intervals};
 use tracing::{debug, trace};
 
-pub struct DestinationPropagation;
+pub(super) struct DestinationPropagation;
 
 impl<'tcx> crate::MirPass<'tcx> for DestinationPropagation {
     fn is_enabled(&self, sess: &rustc_session::Session) -> bool {
@@ -242,7 +242,7 @@ impl<'tcx> crate::MirPass<'tcx> for DestinationPropagation {
             }
             round_count += 1;
 
-            apply_merges(body, tcx, &merges, &merged_locals);
+            apply_merges(body, tcx, merges, merged_locals);
         }
 
         trace!(round_count);
@@ -281,20 +281,20 @@ struct Candidates {
 fn apply_merges<'tcx>(
     body: &mut Body<'tcx>,
     tcx: TyCtxt<'tcx>,
-    merges: &FxIndexMap<Local, Local>,
-    merged_locals: &BitSet<Local>,
+    merges: FxIndexMap<Local, Local>,
+    merged_locals: BitSet<Local>,
 ) {
     let mut merger = Merger { tcx, merges, merged_locals };
     merger.visit_body_preserves_cfg(body);
 }
 
-struct Merger<'a, 'tcx> {
+struct Merger<'tcx> {
     tcx: TyCtxt<'tcx>,
-    merges: &'a FxIndexMap<Local, Local>,
-    merged_locals: &'a BitSet<Local>,
+    merges: FxIndexMap<Local, Local>,
+    merged_locals: BitSet<Local>,
 }
 
-impl<'a, 'tcx> MutVisitor<'tcx> for Merger<'a, 'tcx> {
+impl<'tcx> MutVisitor<'tcx> for Merger<'tcx> {
     fn tcx(&self) -> TyCtxt<'tcx> {
         self.tcx
     }

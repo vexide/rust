@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::result;
 use std::sync::Arc;
 
-use rustc_ast::{token, LitKind, MetaItemKind};
+use rustc_ast::{LitKind, MetaItemKind, token};
 use rustc_codegen_ssa::traits::CodegenBackend;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::stable_hasher::StableHasher;
@@ -21,10 +21,10 @@ use rustc_query_system::query::print_query_stack;
 use rustc_session::config::{self, Cfg, CheckCfg, ExpectedValues, Input, OutFileName};
 use rustc_session::filesearch::{self, sysroot_candidates};
 use rustc_session::parse::ParseSess;
-use rustc_session::{lint, CompilerIO, EarlyDiagCtxt, Session};
+use rustc_session::{CompilerIO, EarlyDiagCtxt, Session, lint};
+use rustc_span::FileName;
 use rustc_span::source_map::{FileLoader, RealFileLoader, SourceMapInputs};
 use rustc_span::symbol::sym;
-use rustc_span::FileName;
 use tracing::trace;
 
 use crate::util;
@@ -174,7 +174,7 @@ pub(crate) fn parse_check_cfg(dcx: DiagCtxtHandle<'_>, specs: Vec<String>) -> Ch
             }
         };
 
-        let meta_item = match parser.parse_meta_item(AllowLeadingUnsafe::Yes) {
+        let meta_item = match parser.parse_meta_item(AllowLeadingUnsafe::No) {
             Ok(meta_item) if parser.token == token::Eof => meta_item,
             Ok(..) => expected_error(),
             Err(err) => {
@@ -311,7 +311,9 @@ pub struct Config {
     pub output_file: Option<OutFileName>,
     pub ice_file: Option<PathBuf>,
     pub file_loader: Option<Box<dyn FileLoader + Send + Sync>>,
-    pub locale_resources: &'static [&'static str],
+    /// The list of fluent resources, used for lints declared with
+    /// [`Diagnostic`](rustc_errors::Diagnostic) and [`LintDiagnostic`](rustc_errors::LintDiagnostic).
+    pub locale_resources: Vec<&'static str>,
 
     pub lint_caps: FxHashMap<lint::LintId, lint::Level>,
 
@@ -425,7 +427,7 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
                 Err(e) => early_dcx.early_fatal(format!("failed to load fluent bundle: {e}")),
             };
 
-            let mut locale_resources = Vec::from(config.locale_resources);
+            let mut locale_resources = config.locale_resources;
             locale_resources.push(codegen_backend.locale_resource());
 
             let mut sess = rustc_session::build_session(

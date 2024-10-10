@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::{env, iter};
 
 use crate::core::config::TargetSelection;
-use crate::utils::exec::{command, BootstrapCommand};
+use crate::utils::exec::{BootstrapCommand, command};
 use crate::{Build, CLang, GitRepo};
 
 // The `cc` crate doesn't provide a way to obtain a path to the detected archiver,
@@ -90,7 +90,6 @@ pub fn find(build: &Build) {
     let targets: HashSet<_> = match build.config.cmd {
         // We don't need to check cross targets for these commands.
         crate::Subcommand::Clean { .. }
-        | crate::Subcommand::Check { .. }
         | crate::Subcommand::Suggest { .. }
         | crate::Subcommand::Format { .. }
         | crate::Subcommand::Setup { .. } => {

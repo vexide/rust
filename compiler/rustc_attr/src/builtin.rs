@@ -4,21 +4,21 @@ use std::num::NonZero;
 
 use rustc_abi::Align;
 use rustc_ast::{
-    self as ast, attr, Attribute, LitKind, MetaItem, MetaItemKind, MetaItemLit, NestedMetaItem,
-    NodeId,
+    self as ast, Attribute, LitKind, MetaItem, MetaItemKind, MetaItemLit, NestedMetaItem, NodeId,
+    attr,
 };
 use rustc_ast_pretty::pprust;
 use rustc_errors::ErrorGuaranteed;
-use rustc_feature::{find_gated_cfg, is_builtin_attr_name, Features, GatedCfg};
+use rustc_feature::{Features, GatedCfg, find_gated_cfg, is_builtin_attr_name};
 use rustc_macros::{Decodable, Encodable, HashStable_Generic};
 use rustc_session::config::ExpectedValues;
-use rustc_session::lint::builtin::UNEXPECTED_CFGS;
 use rustc_session::lint::BuiltinLintDiag;
+use rustc_session::lint::builtin::UNEXPECTED_CFGS;
 use rustc_session::parse::feature_err;
 use rustc_session::{RustcVersion, Session};
-use rustc_span::hygiene::Transparency;
-use rustc_span::symbol::{sym, Symbol};
 use rustc_span::Span;
+use rustc_span::hygiene::Transparency;
+use rustc_span::symbol::{Symbol, sym};
 
 use crate::fluent_generated;
 use crate::session_diagnostics::{self, IncorrectReprFormatGenericCause};
@@ -79,6 +79,10 @@ impl Stability {
 
     pub fn is_stable(&self) -> bool {
         self.level.is_stable()
+    }
+
+    pub fn stable_since(&self) -> Option<StableSince> {
+        self.level.stable_since()
     }
 }
 
@@ -153,7 +157,7 @@ pub enum StabilityLevel {
 }
 
 /// Rust release in which a feature is stabilized.
-#[derive(Encodable, Decodable, PartialEq, Copy, Clone, Debug, Eq, Hash)]
+#[derive(Encodable, Decodable, PartialEq, Copy, Clone, Debug, Eq, PartialOrd, Ord, Hash)]
 #[derive(HashStable_Generic)]
 pub enum StableSince {
     Version(RustcVersion),
@@ -169,6 +173,12 @@ impl StabilityLevel {
     }
     pub fn is_stable(&self) -> bool {
         matches!(self, StabilityLevel::Stable { .. })
+    }
+    pub fn stable_since(&self) -> Option<StableSince> {
+        match *self {
+            StabilityLevel::Stable { since, .. } => Some(since),
+            StabilityLevel::Unstable { .. } => None,
+        }
     }
 }
 
@@ -1240,5 +1250,5 @@ pub fn parse_confusables(attr: &Attribute) -> Option<Vec<Symbol>> {
         candidates.push(meta_lit.symbol);
     }
 
-    return Some(candidates);
+    Some(candidates)
 }

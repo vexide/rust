@@ -26,7 +26,7 @@ mod layout;
 #[cfg(test)]
 mod tests;
 
-pub use layout::LayoutCalculator;
+pub use layout::{LayoutCalculator, LayoutCalculatorError};
 
 /// Requirements for a `StableHashingContext` to be used in this crate.
 /// This is a hack to allow using the `HashStable_Generic` derive macro
@@ -337,23 +337,21 @@ impl TargetDataLayout {
         Ok(dl)
     }
 
-    /// Returns exclusive upper bound on object size.
+    /// Returns **exclusive** upper bound on object size in bytes.
     ///
     /// The theoretical maximum object size is defined as the maximum positive `isize` value.
     /// This ensures that the `offset` semantics remain well-defined by allowing it to correctly
     /// index every address within an object along with one byte past the end, along with allowing
     /// `isize` to store the difference between any two pointers into an object.
     ///
-    /// The upper bound on 64-bit currently needs to be lower because LLVM uses a 64-bit integer
-    /// to represent object size in bits. It would need to be 1 << 61 to account for this, but is
-    /// currently conservatively bounded to 1 << 47 as that is enough to cover the current usable
-    /// address space on 64-bit ARMv8 and x86_64.
+    /// LLVM uses a 64-bit integer to represent object size in *bits*, but we care only for bytes,
+    /// so we adopt such a more-constrained size bound due to its technical limitations.
     #[inline]
     pub fn obj_size_bound(&self) -> u64 {
         match self.pointer_size.bits() {
             16 => 1 << 15,
             32 => 1 << 31,
-            64 => 1 << 47,
+            64 => 1 << 61,
             bits => panic!("obj_size_bound: unknown pointer bit size {bits}"),
         }
     }
@@ -390,6 +388,14 @@ impl HasDataLayout for TargetDataLayout {
     #[inline]
     fn data_layout(&self) -> &TargetDataLayout {
         self
+    }
+}
+
+// used by rust-analyzer
+impl HasDataLayout for &TargetDataLayout {
+    #[inline]
+    fn data_layout(&self) -> &TargetDataLayout {
+        (**self).data_layout()
     }
 }
 
@@ -781,6 +787,14 @@ impl Align {
 }
 
 /// A pair of alignments, ABI-mandated and preferred.
+///
+/// The "preferred" alignment is an LLVM concept that is virtually meaningless to Rust code:
+/// it is not exposed semantically to programmers nor can they meaningfully affect it.
+/// The only concern for us is that preferred alignment must not be less than the mandated alignment
+/// and thus in practice the two values are almost always identical.
+///
+/// An example of a rare thing actually affected by preferred alignment is aligning of statics.
+/// It is of effectively no consequence for layout in structs and on the stack.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "nightly", derive(HashStable_Generic))]
 pub struct AbiAndPrefAlign {
@@ -817,6 +831,28 @@ pub enum Integer {
 }
 
 impl Integer {
+    pub fn int_ty_str(self) -> &'static str {
+        use Integer::*;
+        match self {
+            I8 => "i8",
+            I16 => "i16",
+            I32 => "i32",
+            I64 => "i64",
+            I128 => "i128",
+        }
+    }
+
+    pub fn uint_ty_str(self) -> &'static str {
+        use Integer::*;
+        match self {
+            I8 => "u8",
+            I16 => "u16",
+            I32 => "u32",
+            I64 => "u64",
+            I128 => "u128",
+        }
+    }
+
     #[inline]
     pub fn size(self) -> Size {
         use Integer::*;
@@ -1102,13 +1138,10 @@ impl Scalar {
     #[inline]
     pub fn is_bool(&self) -> bool {
         use Integer::*;
-        matches!(
-            self,
-            Scalar::Initialized {
-                value: Primitive::Int(I8, false),
-                valid_range: WrappingRange { start: 0, end: 1 }
-            }
-        )
+        matches!(self, Scalar::Initialized {
+            value: Primitive::Int(I8, false),
+            valid_range: WrappingRange { start: 0, end: 1 }
+        })
     }
 
     /// Get the primitive representation of this type, ignoring the valid range and whether the

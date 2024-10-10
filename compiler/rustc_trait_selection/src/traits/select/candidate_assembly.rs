@@ -8,8 +8,8 @@
 
 use std::ops::ControlFlow;
 
-use hir::def_id::DefId;
 use hir::LangItem;
+use hir::def_id::DefId;
 use rustc_data_structures::fx::{FxHashSet, FxIndexSet};
 use rustc_hir as hir;
 use rustc_infer::traits::{Obligation, ObligationCause, PolyTraitObligation, SelectionError};
@@ -426,13 +426,11 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     } else if kind == ty::ClosureKind::FnOnce {
                         candidates.vec.push(ClosureCandidate { is_const });
                     }
+                } else if kind == ty::ClosureKind::FnOnce {
+                    candidates.vec.push(ClosureCandidate { is_const });
                 } else {
-                    if kind == ty::ClosureKind::FnOnce {
-                        candidates.vec.push(ClosureCandidate { is_const });
-                    } else {
-                        // This stays ambiguous until kind+upvars are determined.
-                        candidates.ambiguous = true;
-                    }
+                    // This stays ambiguous until kind+upvars are determined.
+                    candidates.ambiguous = true;
                 }
             }
             ty::Infer(ty::TyVar(_)) => {
@@ -513,10 +511,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         // then there's nothing else to check.
         if let Some(closure_kind) = self_ty.to_opt_closure_kind()
             && let Some(goal_kind) = target_kind_ty.to_opt_closure_kind()
+            && closure_kind.extends(goal_kind)
         {
-            if closure_kind.extends(goal_kind) {
-                candidates.vec.push(AsyncFnKindHelperCandidate);
-            }
+            candidates.vec.push(AsyncFnKindHelperCandidate);
         }
     }
 
@@ -886,7 +883,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                         if let Some(principal) = data.principal() {
                             if !self.infcx.tcx.features().object_safe_for_dispatch {
                                 principal.with_self_ty(self.tcx(), self_ty)
-                            } else if self.tcx().is_object_safe(principal.def_id()) {
+                            } else if self.tcx().is_dyn_compatible(principal.def_id()) {
                                 principal.with_self_ty(self.tcx(), self_ty)
                             } else {
                                 return;

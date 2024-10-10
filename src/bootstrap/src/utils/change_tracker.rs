@@ -250,4 +250,24 @@ pub const CONFIG_CHANGE_HISTORY: &[ChangeInfo] = &[
         severity: ChangeSeverity::Info,
         summary: "New option `llvm.enzyme` to control whether the llvm based autodiff tool (Enzyme) is built.",
     },
+    ChangeInfo {
+        change_id: 129473,
+        severity: ChangeSeverity::Warning,
+        summary: "`download-ci-llvm = true` now checks if CI llvm is available and has become the default for the compiler profile",
+    },
+    ChangeInfo {
+        change_id: 130202,
+        severity: ChangeSeverity::Info,
+        summary: "'tools' and 'library' profiles switched `download-ci-llvm` option from `if-unchanged` to `true`.",
+    },
+    ChangeInfo {
+        change_id: 130110,
+        severity: ChangeSeverity::Info,
+        summary: "New option `dist.vendor` added to control whether bootstrap should vendor dependencies for dist tarball.",
+    },
+    ChangeInfo {
+        change_id: 130529,
+        severity: ChangeSeverity::Info,
+        summary: "If `llvm.download-ci-llvm` is not defined, it defaults to `true`.",
+    },
 ];

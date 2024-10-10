@@ -9,27 +9,27 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::io::prelude::*;
 use std::io::BufReader;
+use std::io::prelude::*;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::{env, fs, str};
 
+use build_helper::git::get_closest_merge_commit;
 use serde_derive::Deserialize;
 
 use crate::core::build_steps::tool::SourceType;
 use crate::core::build_steps::{dist, llvm};
 use crate::core::builder;
 use crate::core::builder::{
-    crate_description, Builder, Cargo, Kind, PathSet, RunConfig, ShouldRun, Step, TaskPath,
+    Builder, Cargo, Kind, PathSet, RunConfig, ShouldRun, Step, TaskPath, crate_description,
 };
 use crate::core::config::{DebuginfoLevel, LlvmLibunwind, RustcLto, TargetSelection};
 use crate::utils::exec::command;
 use crate::utils::helpers::{
-    self, exe, get_clang_cl_resource_dir, get_closest_merge_base_commit, is_debug_info, is_dylib,
-    symlink_dir, t, up_to_date,
+    self, exe, get_clang_cl_resource_dir, is_debug_info, is_dylib, symlink_dir, t, up_to_date,
 };
-use crate::{CLang, Compiler, DependencyType, GitRepo, Mode, LLVM_TOOLS};
+use crate::{CLang, Compiler, DependencyType, GitRepo, LLVM_TOOLS, Mode};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Std {
@@ -127,13 +127,9 @@ impl Step for Std {
         // the `rust.download-rustc=true` option.
         let force_recompile =
             if builder.rust_info().is_managed_git_subrepository() && builder.download_rustc() {
-                let closest_merge_commit = get_closest_merge_base_commit(
-                    Some(&builder.src),
-                    &builder.config.git_config(),
-                    &builder.config.stage0_metadata.config.git_merge_commit_email,
-                    &[],
-                )
-                .unwrap();
+                let closest_merge_commit =
+                    get_closest_merge_commit(Some(&builder.src), &builder.config.git_config(), &[])
+                        .unwrap();
 
                 // Check if `library` has changes (returns false otherwise)
                 !t!(helpers::git(Some(&builder.src))
@@ -1061,6 +1057,10 @@ pub fn rustc_cargo(
     // killed, rather than having an error bubble up and cause a panic.
     cargo.rustflag("-Zon-broken-pipe=kill");
 
+    if builder.config.llvm_enzyme {
+        cargo.rustflag("-l").rustflag("Enzyme-19");
+    }
+
     // We currently don't support cross-crate LTO in stage0. This also isn't hugely necessary
     // and may just be a time sink.
     if compiler.stage != 0 {
@@ -1205,7 +1205,8 @@ pub fn rustc_cargo_env(
     // busting caches (e.g. like #71152).
     if builder.config.llvm_enabled(target) {
         let building_is_expensive =
-            crate::core::build_steps::llvm::prebuilt_llvm_config(builder, target).should_build();
+            crate::core::build_steps::llvm::prebuilt_llvm_config(builder, target, false)
+                .should_build();
         // `top_stage == stage` might be false for `check --stage 1`, if we are building the stage 1 compiler
         let can_skip_build = builder.kind == Kind::Check && builder.top_stage == stage;
         let should_skip_build = building_is_expensive && can_skip_build;
@@ -1764,6 +1765,49 @@ impl Step for Assemble {
             return target_compiler;
         }
 
+        // We prepend this bin directory to the user PATH when linking Rust binaries. To
+        // avoid shadowing the system LLD we rename the LLD we provide to `rust-lld`.
+        let libdir = builder.sysroot_libdir(target_compiler, target_compiler.host);
+        let libdir_bin = libdir.parent().unwrap().join("bin");
+        t!(fs::create_dir_all(&libdir_bin));
+
+        if builder.config.llvm_enabled(target_compiler.host) {
+            let llvm::LlvmResult { llvm_config, .. } =
+                builder.ensure(llvm::Llvm { target: target_compiler.host });
+            if !builder.config.dry_run() && builder.config.llvm_tools_enabled {
+                let llvm_bin_dir =
+                    command(llvm_config).arg("--bindir").run_capture_stdout(builder).stdout();
+                let llvm_bin_dir = Path::new(llvm_bin_dir.trim());
+
+                // Since we've already built the LLVM tools, install them to the sysroot.
+                // This is the equivalent of installing the `llvm-tools-preview` component via
+                // rustup, and lets developers use a locally built toolchain to
+                // build projects that expect llvm tools to be present in the sysroot
+                // (e.g. the `bootimage` crate).
+                for tool in LLVM_TOOLS {
+                    let tool_exe = exe(tool, target_compiler.host);
+                    let src_path = llvm_bin_dir.join(&tool_exe);
+                    // When using `download-ci-llvm`, some of the tools
+                    // may not exist, so skip trying to copy them.
+                    if src_path.exists() {
+                        builder.copy_link(&src_path, &libdir_bin.join(&tool_exe));
+                    }
+                }
+            }
+        }
+
+        let maybe_install_llvm_bitcode_linker = |compiler| {
+            if builder.config.llvm_bitcode_linker_enabled {
+                let src_path = builder.ensure(crate::core::build_steps::tool::LlvmBitcodeLinker {
+                    compiler,
+                    target: target_compiler.host,
+                    extra_features: vec![],
+                });
+                let tool_exe = exe("llvm-bitcode-linker", target_compiler.host);
+                builder.copy_link(&src_path, &libdir_bin.join(tool_exe));
+            }
+        };
+
         // If we're downloading a compiler from CI, we can use the same compiler for all stages other than 0.
         if builder.download_rustc() {
             builder.ensure(Std::new(target_compiler, target_compiler.host));
@@ -1776,6 +1820,9 @@ impl Step for Assemble {
             if target_compiler.stage == builder.top_stage {
                 builder.info(&format!("Creating a sysroot for stage{stage} compiler (use `rustup toolchain link 'name' build/host/stage{stage}`)", stage=target_compiler.stage));
             }
+
+            maybe_install_llvm_bitcode_linker(target_compiler);
+
             return target_compiler;
         }
 
@@ -1884,11 +1931,6 @@ impl Step for Assemble {
 
         copy_codegen_backends_to_sysroot(builder, build_compiler, target_compiler);
 
-        // We prepend this bin directory to the user PATH when linking Rust binaries. To
-        // avoid shadowing the system LLD we rename the LLD we provide to `rust-lld`.
-        let libdir = builder.sysroot_libdir(target_compiler, target_compiler.host);
-        let libdir_bin = libdir.parent().unwrap().join("bin");
-        t!(fs::create_dir_all(&libdir_bin));
         if let Some(lld_install) = lld_install {
             let src_exe = exe("lld", target_compiler.host);
             let dst_exe = exe("rust-lld", target_compiler.host);
@@ -1912,7 +1954,7 @@ impl Step for Assemble {
         // delegates to the `rust-lld` binary for linking and then runs
         // logic to create the final binary. This is used by the
         // `wasm32-wasip2` target of Rust.
-        if builder.build_wasm_component_ld() {
+        if builder.tool_enabled("wasm-component-ld") {
             let wasm_component_ld_exe =
                 builder.ensure(crate::core::build_steps::tool::WasmComponentLd {
                     compiler: build_compiler,
@@ -1924,40 +1966,7 @@ impl Step for Assemble {
             );
         }
 
-        if builder.config.llvm_enabled(target_compiler.host) {
-            let llvm::LlvmResult { llvm_config, .. } =
-                builder.ensure(llvm::Llvm { target: target_compiler.host });
-            if !builder.config.dry_run() && builder.config.llvm_tools_enabled {
-                let llvm_bin_dir =
-                    command(llvm_config).arg("--bindir").run_capture_stdout(builder).stdout();
-                let llvm_bin_dir = Path::new(llvm_bin_dir.trim());
-
-                // Since we've already built the LLVM tools, install them to the sysroot.
-                // This is the equivalent of installing the `llvm-tools-preview` component via
-                // rustup, and lets developers use a locally built toolchain to
-                // build projects that expect llvm tools to be present in the sysroot
-                // (e.g. the `bootimage` crate).
-                for tool in LLVM_TOOLS {
-                    let tool_exe = exe(tool, target_compiler.host);
-                    let src_path = llvm_bin_dir.join(&tool_exe);
-                    // When using `download-ci-llvm`, some of the tools
-                    // may not exist, so skip trying to copy them.
-                    if src_path.exists() {
-                        builder.copy_link(&src_path, &libdir_bin.join(&tool_exe));
-                    }
-                }
-            }
-        }
-
-        if builder.config.llvm_bitcode_linker_enabled {
-            let src_path = builder.ensure(crate::core::build_steps::tool::LlvmBitcodeLinker {
-                compiler: build_compiler,
-                target: target_compiler.host,
-                extra_features: vec![],
-            });
-            let tool_exe = exe("llvm-bitcode-linker", target_compiler.host);
-            builder.copy_link(&src_path, &libdir_bin.join(tool_exe));
-        }
+        maybe_install_llvm_bitcode_linker(build_compiler);
 
         // Ensure that `libLLVM.so` ends up in the newly build compiler directory,
         // so that it can be found when the newly built `rustc` is run.

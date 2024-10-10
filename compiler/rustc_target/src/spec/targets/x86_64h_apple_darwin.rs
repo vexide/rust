@@ -1,11 +1,10 @@
-use crate::spec::base::apple::{base, Arch, TargetAbi};
-use crate::spec::{Cc, FramePointer, LinkerFlavor, Lld, SanitizerSet, Target, TargetOptions};
+use crate::spec::base::apple::{Arch, TargetAbi, base};
+use crate::spec::{FramePointer, SanitizerSet, Target, TargetOptions};
 
 pub(crate) fn target() -> Target {
     let (mut opts, llvm_target, arch) = base("macos", Arch::X86_64h, TargetAbi::Normal);
     opts.max_atomic_width = Some(128);
     opts.frame_pointer = FramePointer::Always;
-    opts.add_pre_link_args(LinkerFlavor::Darwin(Cc::Yes, Lld::No), &["-m64"]);
     opts.supported_sanitizers =
         SanitizerSet::ADDRESS | SanitizerSet::CFI | SanitizerSet::LEAK | SanitizerSet::THREAD;
 
@@ -30,7 +29,7 @@ pub(crate) fn target() -> Target {
     Target {
         llvm_target,
         metadata: crate::spec::TargetMetadata {
-            description: Some("macOS with late-gen Intel (at least Haswell)".into()),
+            description: Some("x86_64 Apple macOS with Intel Haswell+".into()),
             tier: Some(3),
             host_tools: Some(true),
             std: Some(true),

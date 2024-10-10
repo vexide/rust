@@ -1,4 +1,4 @@
-pub mod query;
+pub(super) mod query;
 
 mod counters;
 mod graph;
@@ -9,7 +9,7 @@ mod tests;
 mod unexpand;
 
 use rustc_hir as hir;
-use rustc_hir::intravisit::{walk_expr, Visitor};
+use rustc_hir::intravisit::{Visitor, walk_expr};
 use rustc_middle::hir::map::Map;
 use rustc_middle::hir::nested_filter;
 use rustc_middle::mir::coverage::{
@@ -32,7 +32,7 @@ use crate::coverage::mappings::ExtractedMappings;
 /// Inserts `StatementKind::Coverage` statements that either instrument the binary with injected
 /// counters, via intrinsic `llvm.instrprof.increment`, and/or inject metadata used during codegen
 /// to construct the coverage map.
-pub struct InstrumentCoverage;
+pub(super) struct InstrumentCoverage;
 
 impl<'tcx> crate::MirPass<'tcx> for InstrumentCoverage {
     fn is_enabled(&self, sess: &rustc_session::Session) -> bool {
@@ -147,8 +147,8 @@ fn create_mappings<'tcx>(
 
     let source_file = source_map.lookup_source_file(body_span.lo());
 
-    use rustc_session::config::RemapPathScopeComponents;
     use rustc_session::RemapFileNameExt;
+    use rustc_session::config::RemapPathScopeComponents;
     let file_name = Symbol::intern(
         &source_file.name.for_scope(tcx.sess, RemapPathScopeComponents::MACRO).to_string_lossy(),
     );
@@ -279,7 +279,8 @@ fn inject_mcdc_statements<'tcx>(
     basic_coverage_blocks: &CoverageGraph,
     extracted_mappings: &ExtractedMappings,
 ) {
-    // Inject test vector update first because `inject_statement` always insert new statement at head.
+    // Inject test vector update first because `inject_statement` always insert new statement at
+    // head.
     for &mappings::MCDCDecision {
         span: _,
         ref end_bcbs,

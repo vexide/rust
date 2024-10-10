@@ -35,8 +35,8 @@ use utils::helpers::hex_encode;
 
 use crate::core::builder;
 use crate::core::builder::{Builder, Kind};
-use crate::core::config::{flags, DryRun, LldMode, LlvmLibunwind, Target, TargetSelection};
-use crate::utils::exec::{command, BehaviorOnFailure, BootstrapCommand, CommandOutput, OutputMode};
+use crate::core::config::{DryRun, LldMode, LlvmLibunwind, Target, TargetSelection, flags};
+use crate::utils::exec::{BehaviorOnFailure, BootstrapCommand, CommandOutput, OutputMode, command};
 use crate::utils::helpers::{
     self, dir_is_empty, exe, libdir, mtime, output, set_file_times, symlink_dir,
 };
@@ -45,11 +45,11 @@ mod core;
 mod utils;
 
 pub use core::builder::PathSet;
-pub use core::config::flags::{Flags, Subcommand};
 pub use core::config::Config;
+pub use core::config::flags::{Flags, Subcommand};
 
 pub use utils::change_tracker::{
-    find_recent_config_change_ids, human_readable_changes, CONFIG_CHANGE_HISTORY,
+    CONFIG_CHANGE_HISTORY, find_recent_config_change_ids, human_readable_changes,
 };
 
 const LLVM_TOOLS: &[&str] = &[
@@ -145,6 +145,7 @@ pub struct Build {
     rustfmt_info: GitInfo,
     enzyme_info: GitInfo,
     in_tree_llvm_info: GitInfo,
+    in_tree_gcc_info: GitInfo,
     local_rebuild: bool,
     fail_fast: bool,
     doc_tests: DocTests,
@@ -304,17 +305,15 @@ impl Build {
         #[cfg(not(unix))]
         let is_sudo = false;
 
-        let omit_git_hash = config.omit_git_hash;
-        let rust_info = GitInfo::new(omit_git_hash, &src);
-        let cargo_info = GitInfo::new(omit_git_hash, &src.join("src/tools/cargo"));
-        let rust_analyzer_info = GitInfo::new(omit_git_hash, &src.join("src/tools/rust-analyzer"));
-        let clippy_info = GitInfo::new(omit_git_hash, &src.join("src/tools/clippy"));
-        let miri_info = GitInfo::new(omit_git_hash, &src.join("src/tools/miri"));
-        let rustfmt_info = GitInfo::new(omit_git_hash, &src.join("src/tools/rustfmt"));
-        let enzyme_info = GitInfo::new(omit_git_hash, &src.join("src/tools/enzyme"));
-
-        // we always try to use git for LLVM builds
-        let in_tree_llvm_info = GitInfo::new(false, &src.join("src/llvm-project"));
+        let rust_info = config.rust_info.clone();
+        let cargo_info = config.cargo_info.clone();
+        let rust_analyzer_info = config.rust_analyzer_info.clone();
+        let clippy_info = config.clippy_info.clone();
+        let miri_info = config.miri_info.clone();
+        let rustfmt_info = config.rustfmt_info.clone();
+        let enzyme_info = config.enzyme_info.clone();
+        let in_tree_llvm_info = config.in_tree_llvm_info.clone();
+        let in_tree_gcc_info = config.in_tree_gcc_info.clone();
 
         let initial_target_libdir_str = if config.dry_run() {
             "/dummy/lib/path/to/lib/".to_string()
@@ -347,10 +346,14 @@ impl Build {
         };
         let Some(initial_libdir) = find_initial_libdir() else {
             panic!(
-                "couldn't determine `initial_libdir` \
-                from target dir {initial_target_dir:?} \
-                and sysroot {initial_sysroot:?}"
-            )
+                "couldn't determine `initial_libdir`:
+- config.initial_rustc:      {rustc:?}
+- initial_target_libdir_str: {initial_target_libdir_str:?}
+- initial_target_dir:        {initial_target_dir:?}
+- initial_sysroot:           {initial_sysroot:?}
+",
+                rustc = config.initial_rustc,
+            );
         };
 
         let version = std::fs::read_to_string(src.join("src").join("version"))
@@ -407,6 +410,7 @@ impl Build {
             rustfmt_info,
             enzyme_info,
             in_tree_llvm_info,
+            in_tree_gcc_info,
             cc: RefCell::new(HashMap::new()),
             cxx: RefCell::new(HashMap::new()),
             ar: RefCell::new(HashMap::new()),
@@ -545,11 +549,7 @@ impl Build {
             // Look for `submodule.$name.path = $path`
             // Sample output: `submodule.src/rust-installer.path src/tools/rust-installer`
             let submodule = line.split_once(' ').unwrap().1;
-            let path = Path::new(submodule);
-            // Don't update the submodule unless it's already been cloned.
-            if GitInfo::new(false, path).is_managed_git_subrepository() {
-                self.config.update_submodule(submodule);
-            }
+            self.update_existing_submodule(submodule);
         }
     }
 
@@ -591,15 +591,6 @@ impl Build {
                 return core::build_steps::perf::perf(&builder::Builder::new(self));
             }
             _ => (),
-        }
-
-        {
-            let builder = builder::Builder::new(self);
-            if let Some(path) = builder.paths.first() {
-                if path == Path::new("nonexistent/path/to/trigger/cargo/metadata") {
-                    return;
-                }
-            }
         }
 
         if !self.config.dry_run() {
@@ -671,8 +662,8 @@ impl Build {
             features.push_str(" profiler");
         }
         // Generate memcpy, etc.  FIXME: Remove this once compiler-builtins
-        // automatically detects this target.
-        if target.contains("zkvm") {
+        // automatically detects these targets.
+        if target.contains("zkvm") || target.contains("vex") {
             features.push_str(" compiler-builtins-mem");
         }
         features
@@ -763,6 +754,10 @@ impl Build {
 
     fn enzyme_out(&self, target: TargetSelection) -> PathBuf {
         self.out.join(&*target.triple).join("enzyme")
+    }
+
+    fn gcc_out(&self, target: TargetSelection) -> PathBuf {
+        self.out.join(&*target.triple).join("gcc")
     }
 
     fn lld_out(&self, target: TargetSelection) -> PathBuf {
@@ -1375,7 +1370,7 @@ Executed at: {executed_at}"#,
         }
 
         if target.starts_with("wasm") && target.contains("wasi") {
-            self.default_wasi_runner()
+            self.default_wasi_runner(target)
         } else {
             None
         }
@@ -1384,7 +1379,7 @@ Executed at: {executed_at}"#,
     /// When a `runner` configuration is not provided and a WASI-looking target
     /// is being tested this is consulted to prove the environment to see if
     /// there's a runtime already lying around that seems reasonable to use.
-    fn default_wasi_runner(&self) -> Option<String> {
+    fn default_wasi_runner(&self, target: TargetSelection) -> Option<String> {
         let mut finder = crate::core::sanity::Finder::new();
 
         // Look for Wasmtime, and for its default options be sure to disable
@@ -1400,6 +1395,11 @@ Executed at: {executed_at}"#,
                 // inherit the entire environment rather than just this single
                 // environment variable.
                 path.push_str(" --env RUSTC_BOOTSTRAP");
+
+                if target.contains("wasip2") {
+                    path.push_str(" --wasi inherit-network --wasi allow-ip-name-lookup");
+                }
+
                 return Some(path);
             }
         }
@@ -1407,16 +1407,17 @@ Executed at: {executed_at}"#,
         None
     }
 
-    /// Returns whether it's requested that `wasm-component-ld` is built as part
-    /// of the sysroot. This is done either with the `extended` key in
-    /// `config.toml` or with the `tools` set.
-    fn build_wasm_component_ld(&self) -> bool {
-        if self.config.extended {
-            return true;
+    /// Returns whether the specified tool is configured as part of this build.
+    ///
+    /// This requires that both the `extended` key is set and the `tools` key is
+    /// either unset or specifically contains the specified tool.
+    fn tool_enabled(&self, tool: &str) -> bool {
+        if !self.config.extended {
+            return false;
         }
         match &self.config.tools {
-            Some(set) => set.contains("wasm-component-ld"),
-            None => false,
+            Some(set) => set.contains(tool),
+            None => true,
         }
     }
 

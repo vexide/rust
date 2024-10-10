@@ -30,16 +30,21 @@ use super::glb::Glb;
 use super::lub::Lub;
 use super::type_relating::TypeRelating;
 use super::{RelateResult, StructurallyRelateAliases};
-use crate::infer::{relate, DefineOpaqueTypes, InferCtxt, TypeTrace};
+use crate::infer::{DefineOpaqueTypes, InferCtxt, TypeTrace, relate};
 use crate::traits::{Obligation, PredicateObligation};
 
 #[derive(Clone)]
 pub struct CombineFields<'infcx, 'tcx> {
     pub infcx: &'infcx InferCtxt<'tcx>,
+    // Immutable fields
     pub trace: TypeTrace<'tcx>,
     pub param_env: ty::ParamEnv<'tcx>,
-    pub goals: Vec<Goal<'tcx, ty::Predicate<'tcx>>>,
     pub define_opaque_types: DefineOpaqueTypes,
+    // Mutable fields
+    //
+    // Adding any additional field likely requires
+    // changes to the cache of `TypeRelating`.
+    pub goals: Vec<Goal<'tcx, ty::Predicate<'tcx>>>,
 }
 
 impl<'infcx, 'tcx> CombineFields<'infcx, 'tcx> {

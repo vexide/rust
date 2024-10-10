@@ -15,6 +15,7 @@ use std::{env, fs};
 
 use build_helper::git::warn_old_master_branch;
 
+use crate::Build;
 #[cfg(not(feature = "bootstrap-self-test"))]
 use crate::builder::Builder;
 use crate::builder::Kind;
@@ -22,7 +23,6 @@ use crate::builder::Kind;
 use crate::core::build_steps::tool;
 use crate::core::config::Target;
 use crate::utils::exec::command;
-use crate::Build;
 
 pub struct Finder {
     cache: HashMap<OsString, Option<PathBuf>>,
@@ -35,6 +35,7 @@ pub struct Finder {
 //
 // Targets can be removed from this list once they are present in the stage0 compiler (usually by updating the beta compiler of the bootstrap).
 const STAGE0_MISSING_TARGETS: &[&str] = &[
+    "armv7a-vex-v5",
     // just a dummy comment so the list doesn't get onelined
     "armv7-rtems-eabihf",
 ];
@@ -233,7 +234,8 @@ than building it.
         }
 
         // Ignore fake targets that are only used for unit tests in bootstrap.
-        if cfg!(not(feature = "bootstrap-self-test")) && !skip_target_sanity {
+        if cfg!(not(feature = "bootstrap-self-test")) && !skip_target_sanity && !build.local_rebuild
+        {
             let mut has_target = false;
             let target_str = target.to_string();
 
@@ -293,19 +295,19 @@ than building it.
         }
     }
 
-    for host in &build.hosts {
-        if !build.config.dry_run() {
+    if !build.config.dry_run() {
+        for host in &build.hosts {
             cmd_finder.must_have(build.cxx(*host).unwrap());
-        }
 
-        if build.config.llvm_enabled(*host) {
-            // Externally configured LLVM requires FileCheck to exist
-            let filecheck = build.llvm_filecheck(build.build);
-            if !filecheck.starts_with(&build.out)
-                && !filecheck.exists()
-                && build.config.codegen_tests
-            {
-                panic!("FileCheck executable {filecheck:?} does not exist");
+            if build.config.llvm_enabled(*host) {
+                // Externally configured LLVM requires FileCheck to exist
+                let filecheck = build.llvm_filecheck(build.build);
+                if !filecheck.starts_with(&build.out)
+                    && !filecheck.exists()
+                    && build.config.codegen_tests
+                {
+                    panic!("FileCheck executable {filecheck:?} does not exist");
+                }
             }
         }
     }
@@ -354,7 +356,8 @@ than building it.
             // There are three builds of cmake on windows: MSVC, MinGW, and
             // Cygwin. The Cygwin build does not have generators for Visual
             // Studio, so detect that here and error.
-            let out = command("cmake").arg("--help").run_capture_stdout(build).stdout();
+            let out =
+                command("cmake").arg("--help").run_always().run_capture_stdout(build).stdout();
             if !out.contains("Visual Studio") {
                 panic!(
                     "
@@ -378,13 +381,5 @@ $ pacman -R cmake && pacman -S mingw-w64-x86_64-cmake
         cmd_finder.must_have(s);
     }
 
-    // this warning is useless in CI,
-    // and CI probably won't have the right branches anyway.
-    if !build_helper::ci::CiEnv::is_ci() {
-        if let Err(e) = warn_old_master_branch(&build.config.git_config(), &build.config.src)
-            .map_err(|e| e.to_string())
-        {
-            eprintln!("unable to check if upstream branch is old: {e}");
-        }
-    }
+    warn_old_master_branch(&build.config.git_config(), &build.config.src);
 }

@@ -11,7 +11,7 @@ use serde::de::{Deserialize, Deserializer, Error as _};
 use test::{ColorConfig, OutputFormat};
 
 pub use self::Mode::*;
-use crate::util::{add_dylib_path, PathBufExt};
+use crate::util::{PathBufExt, add_dylib_path};
 
 macro_rules! string_enum {
     ($(#[$meta:meta])* $vis:vis enum $name:ident { $($variant:ident => $repr:expr,)* }) => {
@@ -183,6 +183,9 @@ pub struct Config {
     /// The rustc executable.
     pub rustc_path: PathBuf,
 
+    /// The cargo executable.
+    pub cargo_path: Option<PathBuf>,
+
     /// The rustdoc executable.
     pub rustdoc_path: Option<PathBuf>,
 
@@ -346,6 +349,9 @@ pub struct Config {
     /// whether to run `tidy` when a rustdoc test fails
     pub has_tidy: bool,
 
+    /// whether to run `enzyme` autodiff tests
+    pub has_enzyme: bool,
+
     /// The current Rust channel
     pub channel: String,
 
@@ -384,6 +390,7 @@ pub struct Config {
     // Needed both to construct build_helper::git::GitConfig
     pub git_repository: String,
     pub nightly_branch: String,
+    pub git_merge_commit_email: String,
 
     /// True if the profiler runtime is enabled for this target.
     /// Used by the "needs-profiler-support" header in test files.
@@ -461,7 +468,11 @@ impl Config {
     }
 
     pub fn git_config(&self) -> GitConfig<'_> {
-        GitConfig { git_repository: &self.git_repository, nightly_branch: &self.nightly_branch }
+        GitConfig {
+            git_repository: &self.git_repository,
+            nightly_branch: &self.nightly_branch,
+            git_merge_commit_email: &self.git_merge_commit_email,
+        }
     }
 }
 

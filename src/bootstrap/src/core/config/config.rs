@@ -7,14 +7,14 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display};
 use std::io::IsTerminal;
-use std::path::{absolute, Path, PathBuf};
+use std::path::{Path, PathBuf, absolute};
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::OnceLock;
 use std::{cmp, env, fs};
 
 use build_helper::exit;
-use build_helper::git::{output_result, GitConfig};
+use build_helper::git::{GitConfig, get_closest_merge_commit, output_result};
 use serde::{Deserialize, Deserializer};
 use serde_derive::Deserialize;
 
@@ -22,9 +22,9 @@ use crate::core::build_steps::compile::CODEGEN_BACKEND_PREFIX;
 use crate::core::build_steps::llvm;
 pub use crate::core::config::flags::Subcommand;
 use crate::core::config::flags::{Color, Flags, Warnings};
-use crate::utils::cache::{Interned, INTERNER};
+use crate::utils::cache::{INTERNER, Interned};
 use crate::utils::channel::{self, GitInfo};
-use crate::utils::helpers::{self, exe, get_closest_merge_base_commit, output, t};
+use crate::utils::helpers::{self, exe, output, t};
 
 macro_rules! check_ci_llvm {
     ($name:expr) => {
@@ -308,6 +308,7 @@ pub struct Config {
     pub dist_compression_formats: Option<Vec<String>>,
     pub dist_compression_profile: String,
     pub dist_include_mingw_linker: bool,
+    pub dist_vendor: bool,
 
     // libstd features
     pub backtrace: bool, // support for RUST_BACKTRACE
@@ -341,6 +342,15 @@ pub struct Config {
     pub configure_args: Vec<String>,
     pub out: PathBuf,
     pub rust_info: channel::GitInfo,
+
+    pub cargo_info: channel::GitInfo,
+    pub rust_analyzer_info: channel::GitInfo,
+    pub clippy_info: channel::GitInfo,
+    pub miri_info: channel::GitInfo,
+    pub rustfmt_info: channel::GitInfo,
+    pub enzyme_info: channel::GitInfo,
+    pub in_tree_llvm_info: channel::GitInfo,
+    pub in_tree_gcc_info: channel::GitInfo,
 
     // These are either the stage0 downloaded binaries or the locally installed ones.
     pub initial_cargo: PathBuf,
@@ -933,6 +943,7 @@ define_config! {
         compression_formats: Option<Vec<String>> = "compression-formats",
         compression_profile: Option<String> = "compression-profile",
         include_mingw_linker: Option<bool> = "include-mingw-linker",
+        vendor: Option<bool> = "vendor",
     }
 }
 
@@ -1216,13 +1227,23 @@ impl Config {
         }
     }
 
+    pub(crate) fn get_builder_toml(&self, build_name: &str) -> Result<TomlConfig, toml::de::Error> {
+        if self.dry_run() {
+            return Ok(TomlConfig::default());
+        }
+
+        let builder_config_path =
+            self.out.join(self.build.triple).join(build_name).join(BUILDER_CONFIG_FILENAME);
+        Self::get_toml(&builder_config_path)
+    }
+
     #[cfg(test)]
-    fn get_toml(_: &Path) -> Result<TomlConfig, toml::de::Error> {
+    pub(crate) fn get_toml(_: &Path) -> Result<TomlConfig, toml::de::Error> {
         Ok(TomlConfig::default())
     }
 
     #[cfg(not(test))]
-    fn get_toml(file: &Path) -> Result<TomlConfig, toml::de::Error> {
+    pub(crate) fn get_toml(file: &Path) -> Result<TomlConfig, toml::de::Error> {
         let contents =
             t!(fs::read_to_string(file), format!("config file {} not found", file.display()));
         // Deserialize to Value and then TomlConfig to prevent the Deserialize impl of
@@ -1590,6 +1611,9 @@ impl Config {
 
         config.verbose = cmp::max(config.verbose, flags.verbose as usize);
 
+        // Verbose flag is a good default for `rust.verbose-tests`.
+        config.verbose_tests = config.is_verbose();
+
         if let Some(install) = toml.install {
             let Install { prefix, sysconfdir, docdir, bindir, libdir, mandir, datadir } = install;
             config.prefix = prefix.map(PathBuf::from);
@@ -1730,14 +1754,11 @@ impl Config {
             config.rustc_default_linker = default_linker;
             config.musl_root = musl_root.map(PathBuf::from);
             config.save_toolstates = save_toolstates.map(PathBuf::from);
-            set(
-                &mut config.deny_warnings,
-                match flags.warnings {
-                    Warnings::Deny => Some(true),
-                    Warnings::Warn => Some(false),
-                    Warnings::Default => deny_warnings,
-                },
-            );
+            set(&mut config.deny_warnings, match flags.warnings {
+                Warnings::Deny => Some(true),
+                Warnings::Warn => Some(false),
+                Warnings::Default => deny_warnings,
+            });
             set(&mut config.backtrace_on_ice, backtrace_on_ice);
             set(&mut config.rust_verify_llvm_ir, verify_llvm_ir);
             config.rust_thin_lto_import_instr_limit = thin_lto_import_instr_limit;
@@ -1783,6 +1804,19 @@ impl Config {
         let default = config.channel == "dev";
         config.omit_git_hash = omit_git_hash.unwrap_or(default);
         config.rust_info = GitInfo::new(config.omit_git_hash, &config.src);
+
+        config.cargo_info = GitInfo::new(config.omit_git_hash, &config.src.join("src/tools/cargo"));
+        config.rust_analyzer_info =
+            GitInfo::new(config.omit_git_hash, &config.src.join("src/tools/rust-analyzer"));
+        config.clippy_info =
+            GitInfo::new(config.omit_git_hash, &config.src.join("src/tools/clippy"));
+        config.miri_info = GitInfo::new(config.omit_git_hash, &config.src.join("src/tools/miri"));
+        config.rustfmt_info =
+            GitInfo::new(config.omit_git_hash, &config.src.join("src/tools/rustfmt"));
+        config.enzyme_info =
+            GitInfo::new(config.omit_git_hash, &config.src.join("src/tools/enzyme"));
+        config.in_tree_llvm_info = GitInfo::new(false, &config.src.join("src/llvm-project"));
+        config.in_tree_gcc_info = GitInfo::new(false, &config.src.join("src/gcc"));
 
         // We need to override `rust.channel` if it's manually specified when using the CI rustc.
         // This is because if the compiler uses a different channel than the one specified in config.toml,
@@ -1908,34 +1942,9 @@ impl Config {
                         "HELP: To use `llvm.libzstd` for LLVM/LLD builds, set `download-ci-llvm` option to false."
                     );
                 }
-
-                // None of the LLVM options, except assertions, are supported
-                // when using downloaded LLVM. We could just ignore these but
-                // that's potentially confusing, so force them to not be
-                // explicitly set. The defaults and CI defaults don't
-                // necessarily match but forcing people to match (somewhat
-                // arbitrary) CI configuration locally seems bad/hard.
-                check_ci_llvm!(optimize_toml);
-                check_ci_llvm!(thin_lto);
-                check_ci_llvm!(release_debuginfo);
-                check_ci_llvm!(targets);
-                check_ci_llvm!(experimental_targets);
-                check_ci_llvm!(clang_cl);
-                check_ci_llvm!(version_suffix);
-                check_ci_llvm!(cflags);
-                check_ci_llvm!(cxxflags);
-                check_ci_llvm!(ldflags);
-                check_ci_llvm!(use_libcxx);
-                check_ci_llvm!(use_linker);
-                check_ci_llvm!(allow_old_toolchain);
-                check_ci_llvm!(polly);
-                check_ci_llvm!(clang);
-                check_ci_llvm!(build_config);
-                check_ci_llvm!(plugins);
             }
 
-            // NOTE: can never be hit when downloading from CI, since we call `check_ci_llvm!(thin_lto)` above.
-            if config.llvm_thin_lto && link_shared.is_none() {
+            if !config.llvm_from_ci && config.llvm_thin_lto && link_shared.is_none() {
                 // If we're building with ThinLTO on, by default we want to link
                 // to LLVM shared, to avoid re-doing ThinLTO (which happens in
                 // the link step) with each stage.
@@ -2040,13 +2049,19 @@ impl Config {
                 compression_formats,
                 compression_profile,
                 include_mingw_linker,
+                vendor,
             } = dist;
             config.dist_sign_folder = sign_folder.map(PathBuf::from);
             config.dist_upload_addr = upload_addr;
             config.dist_compression_formats = compression_formats;
             set(&mut config.dist_compression_profile, compression_profile);
             set(&mut config.rust_dist_src, src_tarball);
-            set(&mut config.dist_include_mingw_linker, include_mingw_linker)
+            set(&mut config.dist_include_mingw_linker, include_mingw_linker);
+            config.dist_vendor = vendor.unwrap_or_else(|| {
+                // If we're building from git or tarball sources, enable it by default.
+                config.rust_info.is_managed_git_subrepository()
+                    || config.rust_info.is_from_tarball()
+            });
         }
 
         if let Some(r) = rustfmt {
@@ -2374,10 +2389,7 @@ impl Config {
                     self.download_ci_rustc(commit);
 
                     if let Some(config_path) = &self.config {
-                        let builder_config_path =
-                            self.out.join(self.build.triple).join("ci-rustc").join(BUILDER_CONFIG_FILENAME);
-
-                        let ci_config_toml = match Self::get_toml(&builder_config_path) {
+                        let ci_config_toml = match self.get_builder_toml("ci-rustc") {
                             Ok(ci_config_toml) => ci_config_toml,
                             Err(e) if e.to_string().contains("unknown field") => {
                                 println!("WARNING: CI rustc has some fields that are no longer supported in bootstrap; download-rustc will be disabled.");
@@ -2385,7 +2397,7 @@ impl Config {
                                 return None;
                             },
                             Err(e) => {
-                                eprintln!("ERROR: Failed to parse CI rustc config at '{}': {e}", builder_config_path.display());
+                                eprintln!("ERROR: Failed to parse CI rustc config.toml: {e}");
                                 exit!(2);
                             },
                         };
@@ -2438,7 +2450,7 @@ impl Config {
 
     /// Runs a function if verbosity is greater than 0
     pub fn verbose(&self, f: impl Fn()) {
-        if self.verbose > 0 {
+        if self.is_verbose() {
             f()
         }
     }
@@ -2527,6 +2539,7 @@ impl Config {
         GitConfig {
             git_repository: &self.stage0_metadata.config.git_repository,
             nightly_branch: &self.stage0_metadata.config.nightly_branch,
+            git_merge_commit_email: &self.stage0_metadata.config.git_merge_commit_email,
         }
     }
 
@@ -2703,13 +2716,7 @@ impl Config {
 
         // Look for a version to compare to based on the current commit.
         // Only commits merged by bors will have CI artifacts.
-        let commit = get_closest_merge_base_commit(
-            Some(&self.src),
-            &self.git_config(),
-            &self.stage0_metadata.config.git_merge_commit_email,
-            &[],
-        )
-        .unwrap();
+        let commit = get_closest_merge_commit(Some(&self.src), &self.git_config(), &[]).unwrap();
         if commit.is_empty() {
             println!("ERROR: could not find commit hash for downloading rustc");
             println!("HELP: maybe your repository history is too shallow?");
@@ -2728,7 +2735,7 @@ impl Config {
         .success();
         if has_changes {
             if if_unchanged {
-                if self.verbose > 0 {
+                if self.is_verbose() {
                     println!(
                         "WARNING: saw changes to compiler/ or library/ since {commit}; \
                             ignoring `download-rustc`"
@@ -2750,6 +2757,8 @@ impl Config {
         download_ci_llvm: Option<StringOrBool>,
         asserts: bool,
     ) -> bool {
+        let download_ci_llvm = download_ci_llvm.unwrap_or(StringOrBool::Bool(true));
+
         let if_unchanged = || {
             if self.rust_info.is_from_tarball() {
                 // Git is needed for running "if-unchanged" logic.
@@ -2759,6 +2768,8 @@ impl Config {
                 return false;
             }
 
+            // Fetching the LLVM submodule is unnecessary for self-tests.
+            #[cfg(not(feature = "bootstrap-self-test"))]
             self.update_submodule("src/llvm-project");
 
             // Check for untracked changes in `src/llvm-project`.
@@ -2771,20 +2782,18 @@ impl Config {
         };
 
         match download_ci_llvm {
-            None => {
-                (self.channel == "dev" || self.download_rustc_commit.is_some()) && if_unchanged()
-            }
-            Some(StringOrBool::Bool(b)) => {
+            StringOrBool::Bool(b) => {
                 if !b && self.download_rustc_commit.is_some() {
                     panic!(
                         "`llvm.download-ci-llvm` cannot be set to `false` if `rust.download-rustc` is set to `true` or `if-unchanged`."
                     );
                 }
 
-                b
+                // If download-ci-llvm=true we also want to check that CI llvm is available
+                b && llvm::is_ci_llvm_available(self, asserts)
             }
-            Some(StringOrBool::String(s)) if s == "if-unchanged" => if_unchanged(),
-            Some(StringOrBool::String(other)) => {
+            StringOrBool::String(s) if s == "if-unchanged" => if_unchanged(),
+            StringOrBool::String(other) => {
                 panic!("unrecognized option for download-ci-llvm: {:?}", other)
             }
         }
@@ -2800,13 +2809,7 @@ impl Config {
     ) -> Option<String> {
         // Look for a version to compare to based on the current commit.
         // Only commits merged by bors will have CI artifacts.
-        let commit = get_closest_merge_base_commit(
-            Some(&self.src),
-            &self.git_config(),
-            &self.stage0_metadata.config.git_merge_commit_email,
-            &[],
-        )
-        .unwrap();
+        let commit = get_closest_merge_commit(Some(&self.src), &self.git_config(), &[]).unwrap();
         if commit.is_empty() {
             println!("error: could not find commit hash for downloading components from CI");
             println!("help: maybe your repository history is too shallow?");
@@ -2829,7 +2832,7 @@ impl Config {
         let has_changes = !t!(git.as_command_mut().status()).success();
         if has_changes {
             if if_unchanged {
-                if self.verbose > 0 {
+                if self.is_verbose() {
                     println!(
                         "warning: saw changes to one of {modified_paths:?} since {commit}; \
                             ignoring `{option_name}`"
@@ -2844,6 +2847,109 @@ impl Config {
 
         Some(commit.to_string())
     }
+}
+
+/// Compares the current `Llvm` options against those in the CI LLVM builder and detects any incompatible options.
+/// It does this by destructuring the `Llvm` instance to make sure every `Llvm` field is covered and not missing.
+#[cfg(not(feature = "bootstrap-self-test"))]
+pub(crate) fn check_incompatible_options_for_ci_llvm(
+    current_config_toml: TomlConfig,
+    ci_config_toml: TomlConfig,
+) -> Result<(), String> {
+    macro_rules! err {
+        ($current:expr, $expected:expr) => {
+            if let Some(current) = &$current {
+                if Some(current) != $expected.as_ref() {
+                    return Err(format!(
+                        "ERROR: Setting `llvm.{}` is incompatible with `llvm.download-ci-llvm`. \
+                        Current value: {:?}, Expected value(s): {}{:?}",
+                        stringify!($expected).replace("_", "-"),
+                        $current,
+                        if $expected.is_some() { "None/" } else { "" },
+                        $expected,
+                    ));
+                };
+            };
+        };
+    }
+
+    macro_rules! warn {
+        ($current:expr, $expected:expr) => {
+            if let Some(current) = &$current {
+                if Some(current) != $expected.as_ref() {
+                    println!(
+                        "WARNING: `llvm.{}` has no effect with `llvm.download-ci-llvm`. \
+                        Current value: {:?}, Expected value(s): {}{:?}",
+                        stringify!($expected).replace("_", "-"),
+                        $current,
+                        if $expected.is_some() { "None/" } else { "" },
+                        $expected,
+                    );
+                };
+            };
+        };
+    }
+
+    let (Some(current_llvm_config), Some(ci_llvm_config)) =
+        (current_config_toml.llvm, ci_config_toml.llvm)
+    else {
+        return Ok(());
+    };
+
+    let Llvm {
+        optimize,
+        thin_lto,
+        release_debuginfo,
+        assertions: _,
+        tests: _,
+        plugins,
+        ccache: _,
+        static_libstdcpp: _,
+        libzstd,
+        ninja: _,
+        targets,
+        experimental_targets,
+        link_jobs: _,
+        link_shared: _,
+        version_suffix,
+        clang_cl,
+        cflags,
+        cxxflags,
+        ldflags,
+        use_libcxx,
+        use_linker,
+        allow_old_toolchain,
+        polly,
+        clang,
+        enable_warnings,
+        download_ci_llvm: _,
+        build_config,
+        enzyme,
+    } = ci_llvm_config;
+
+    err!(current_llvm_config.optimize, optimize);
+    err!(current_llvm_config.thin_lto, thin_lto);
+    err!(current_llvm_config.release_debuginfo, release_debuginfo);
+    err!(current_llvm_config.libzstd, libzstd);
+    err!(current_llvm_config.targets, targets);
+    err!(current_llvm_config.experimental_targets, experimental_targets);
+    err!(current_llvm_config.clang_cl, clang_cl);
+    err!(current_llvm_config.version_suffix, version_suffix);
+    err!(current_llvm_config.cflags, cflags);
+    err!(current_llvm_config.cxxflags, cxxflags);
+    err!(current_llvm_config.ldflags, ldflags);
+    err!(current_llvm_config.use_libcxx, use_libcxx);
+    err!(current_llvm_config.use_linker, use_linker);
+    err!(current_llvm_config.allow_old_toolchain, allow_old_toolchain);
+    err!(current_llvm_config.polly, polly);
+    err!(current_llvm_config.clang, clang);
+    err!(current_llvm_config.build_config, build_config);
+    err!(current_llvm_config.plugins, plugins);
+    err!(current_llvm_config.enzyme, enzyme);
+
+    warn!(current_llvm_config.enable_warnings, enable_warnings);
+
+    Ok(())
 }
 
 /// Compares the current Rust options against those in the CI rustc builder and detects any incompatible options.
