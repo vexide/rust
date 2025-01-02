@@ -29,6 +29,7 @@ cfg_if::cfg_if! {
         windows,
         target_os = "psp",
         target_os = "solid_asp3",
+        target_os = "vexos",
         all(target_vendor = "fortanix", target_env = "sgx"),
     ))] {
         mod libunwind;
@@ -126,7 +127,7 @@ extern "C" {}
 #[link(name = "gcc_s", cfg(not(target_feature = "crt-static")))]
 extern "C" {}
 
-#[cfg(all(target_vendor = "fortanix", target_env = "sgx"))]
+#[cfg(any(all(target_vendor = "fortanix", target_env = "sgx"), target_os = "vexos"))]
 #[link(name = "unwind", kind = "static", modifiers = "-bundle")]
 extern "C" {}
 

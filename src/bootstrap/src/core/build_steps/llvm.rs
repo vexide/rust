@@ -1417,16 +1417,21 @@ impl Step for Libunwind {
             cfg.cargo_metadata(false);
             cfg.out_dir(&out_dir);
 
-            if self.target.contains("x86_64-fortanix-unknown-sgx") {
+            if self.target.contains("x86_64-fortanix-unknown-sgx") || self.target.contains("armv7a-vex-v5") {
                 cfg.static_flag(true);
                 cfg.flag("-fno-stack-protector");
                 cfg.flag("-ffreestanding");
                 cfg.flag("-fexceptions");
 
+                if self.target.contains("x86_64-fortanix-unknown-sgx") {
+                    cfg.flag("-U_FORTIFY_SOURCE");
+                    cfg.define("_FORTIFY_SOURCE", "0");
+                    cfg.define("RUST_SGX", "1");
+                } else {
+                    cfg.define("_LIBUNWIND_HAS_NO_THREADS", None);
+                }
+
                 // easiest way to undefine since no API available in cc::Build to undefine
-                cfg.flag("-U_FORTIFY_SOURCE");
-                cfg.define("_FORTIFY_SOURCE", "0");
-                cfg.define("RUST_SGX", "1");
                 cfg.define("__NO_STRING_INLINES", None);
                 cfg.define("__NO_MATH_INLINES", None);
                 cfg.define("_LIBUNWIND_IS_BAREMETAL", None);

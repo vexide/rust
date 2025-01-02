@@ -25,7 +25,7 @@ pub(crate) fn target() -> Target {
             linker: Some("rust-lld".into()),
             linker_flavor: LinkerFlavor::Gnu(Cc::No, Lld::Yes),
             link_script: Some(LINK_SCRIPT.into()),
-            panic_strategy: PanicStrategy::Abort,
+            panic_strategy: PanicStrategy::Unwind,
             relocation_model: RelocModel::Static,
             c_enum_min_bits: Some(8),
             max_atomic_width: Some(64),

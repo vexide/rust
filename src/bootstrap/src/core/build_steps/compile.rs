@@ -307,7 +307,7 @@ fn copy_third_party_objects(
         );
     }
 
-    if target == "x86_64-fortanix-unknown-sgx"
+    if target == "x86_64-fortanix-unknown-sgx" || target == "armv7a-vex-v5"
         || builder.config.llvm_libunwind(target) == LlvmLibunwind::InTree
             && (target.contains("linux") || target.contains("fuchsia") || target.contains("aix"))
     {
