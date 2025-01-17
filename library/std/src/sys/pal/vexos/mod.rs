@@ -22,12 +22,17 @@ use crate::time::{Duration, Instant};
 
 global_asm!(
     r#"
+    # This code needs to be in ARM mode because vexOS sets the processor 
+    # to be ARM mode before jumping to the boot code. The usage of bx at
+    # the end of boot will change the processor to Thumb mode.
+    .arm
     .section .boot, "ax"
     .global _boot
 
     _boot:
         ldr sp, =__stack_top @ Set up the user stack.
-        b _start             @ Jump to the Rust entrypoint.
+        ldr r0, =_start      @ Load the address of the Rust entrypoint.
+        bx r0                @ Jump to the Rust entrypoint.
     "#
 );
 
