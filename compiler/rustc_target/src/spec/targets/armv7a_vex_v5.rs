@@ -24,7 +24,7 @@ pub(crate) fn target() -> Target {
             env: "v5".into(),
             cpu: "cortex-a9".into(),
             abi: "eabihf".into(),
-            features: "+v7,+neon,+vfp3d16,+thumb2".into(),
+            features: "+v7,+neon,+vfp3d16,+thumb2,+thumb-mode".into(),
             linker: Some("rust-lld".into()),
             linker_flavor: LinkerFlavor::Gnu(Cc::No, Lld::Yes),
             link_script: Some(LINK_SCRIPT.into()),
